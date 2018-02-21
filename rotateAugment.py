@@ -130,12 +130,16 @@ class Augment:
     def rotateAllPoints(self, angle, tf_labels, sizeHW):
         '''THIS FUNCTION TAKES IN ANGLE, TF B.B LABELS AND THE SIZE OF THE IMAGE 
         AND WILL APPLY ROTATION TO THE LABELS AND RETURN LABELS IN TF FORMAT'''
+        n = len(tf_labels[-1,:,:])
+        rads = np.deg2rad(angle)
+        rotation_matrix = np.array([[np.cos(rads), -np.sin(rads)],
+                                    [np.sin(rads), np.cos(rads)]])
+        
         # TAKES IN TF FORMAT LABELS AND CREATES POINTS FOR EACH CORNER OF THE
         # BOUNDING BOX IN [X,Y] FORMAT
         boxes = tf_labels[-1,:,:]
-        numBoxes = len(tf_labels[-1,:,:])
         all_points = []
-        for i in range(numBoxes):
+        for i in range(n):
             points=[[boxes[i,1],boxes[i,0]],
                     [boxes[i,1],boxes[i,2]],
                     [boxes[i,3],boxes[i,0]],
@@ -148,43 +152,38 @@ class Augment:
         all_points[:,:,0] = (all_points[:,:,0]*sizeHW[1])-sizeHW[1]/2
         
         # TAKES IN ALL POINTS ROTATES THEM
-        rads = np.deg2rad(angle)
-        rotation_matrix = np.array([[np.cos(rads), -np.sin(rads)],
-                                    [np.sin(rads), np.cos(rads)]])
-        new_points = []
-        n = all_points.shape[0]
+        rot_points = []
         for i in range(n):
-            points = np.zeros([2])
+            points = []
             for ii in range(4):
                 new_point = np.matmul(rotation_matrix,all_points[i,ii,:])
-                points = np.vstack((points,new_point))
-            new_points.append(points[1:,:])
-        new_points = np.asarray(new_points)
+                points.append(new_point)
+            rot_points.append(points)
+        rot_points = np.asarray(rot_points)
         
         # CONVERT BACK TO IMG ARRAY FORM IN PERCENTAGES
-        new_points[:,:,1] = (-(new_points[:,:,1])+sizeHW[0]/2)/sizeHW[0]
-        new_points[:,:,0] = (new_points[:,:,0]+sizeHW[1]/2)/sizeHW[1]
+        rot_points[:,:,1] = (-(rot_points[:,:,1])+sizeHW[0]/2)/sizeHW[0]
+        rot_points[:,:,0] = (rot_points[:,:,0]+sizeHW[1]/2)/sizeHW[1]
         
         # CONVERT POINTS TO TF FORMAT
-        all_boxes = np.zeros([4])
+        all_boxes = []
         for i in range(n):
-            box = [np.min(new_points[i,:,1]),np.min(new_points[i,:,0]),
-                   np.max(new_points[i,:,1]),np.max(new_points[i,:,0])]
-            all_boxes = np.vstack((all_boxes,box))
-        all_boxes = all_boxes[1:,:]
+            box = [np.min(rot_points[i,:,1]),np.min(rot_points[i,:,0]),
+                   np.max(rot_points[i,:,1]),np.max(rot_points[i,:,0])]
+            all_boxes.append(box)
         
         # MAKE SURE ALL VALUES ARE >= 0 AND EXPAND DIMENSION FOR TF FORMAT
+        all_boxes = np.asarray(all_boxes)
         all_boxes[all_boxes<0] = 0
         return np.expand_dims(all_boxes,0)
     
-    def rotate(self, angle, image, label, sizeHW):
-        '''TAKES IN ANGLE, IMAGE, YOLO FORMAT LABELS AND IMAGE SIZE AND 
-        RETURNS ROTATED IMAGE AND ROTATED LABELS'''
+    def rotate(self, angle, image, labels, sizeHW):
+        '''TAKES IN ANGLE, IMAGE, TF FORMAT LABELS AND IMAGE SIZE AND 
+        RETURNS ROTATED IMAGE AND ROTATED LABELS IN YOLO FORMAT'''
         img = transform.rotate(image, angle, mode='edge')
-        tf_labels = self.convert_yolo_2_tf(label)
-        label = self.rotateAllPoints(angle, tf_labels, sizeHW)
-        label = self.convert_tf_2_yolo(label)
-        return img, label
+        labels = self.rotateAllPoints(angle, labels, sizeHW)
+        labels = self.convert_tf_2_yolo(labels)
+        return img, labels
     
     def rotateAugment(self, path):
         files = self.getImageFileList(path)
@@ -204,31 +203,38 @@ class Augment:
         
         try:
             self.dirDict['augImages'].mkdir()
-        except Exception as error:
-            print(error)
-            
+        except:
+            delDir = input('augImages directory allready exists, delete? (Y/N): ').lower()
+            if delDir == 'y':
+                shutil.rmtree(self.dirDict['augImages'].as_posix())
+                self.dirDict['augImages'].mkdir()
+               
         if dataSanity == 'y':
             try:
                 self.dirDict['sanityCheck'].mkdir()
-            except Exception as error:
-                print(error)
+            except:
+                delDir = input('sanityCheck directory allready exists, delete? (Y/N): ').lower()
+                if delDir == 'y':
+                    shutil.rmtree(self.dirDict['sanityCheck'].as_posix())
+                    self.dirDict['sanityCheck'].mkdir()
         
         for file in files:
             image, sizeHW, classes, labels = self.loadImage(file, path)
-            boxes = self.convert_yolo_2_tf(labels)
-            if len(boxes[boxes<=0.05]) == 0 and len(boxes[boxes>=0.95]) == 0:
+            labels = self.convert_yolo_2_tf(labels)
+            # BOXES WHOSE MIN OR MAX ARE WITHIN 5% OF IMAGE EDGES WONT BE ROTATED
+            if len(labels[labels<=0.05]) == 0 and len(labels[labels>=0.95]) == 0:
                 if np.random.rand() <= self.ROTATE_PER:
                     angle = np.random.randint(self.ROTATE_MIN, self.ROTATE_MAX)
                     rot_img, rot_coord = self.rotate(angle, image, labels, sizeHW)
                     filename = file.split('.')[0]
-                    label = open((self.dirDict['augImages'] / (filename+'_aug.txt'))
+                    rot_label = open((self.dirDict['augImages'] / (filename+'_aug.txt'))
                                  .as_posix(),'w')
                     for i in range(len(classes)):
-                        label.write('{} {:.7f} {:.7f} {:.7f} {:.7f} \n'
+                        rot_label.write('{} {:.7f} {:.7f} {:.7f} {:.7f} \n'
                                     .format(classes[i], 
                                     rot_coord[i][0], rot_coord[i][1], 
                                     rot_coord[i][2], rot_coord[i][3]))
-                    label.close()
+                    rot_label.close()
                     
                     # CONVERT IMAGE TO RGB AND SAVE
                     io.imsave((self.dirDict['augImages'] / (filename+'_aug.jpg'))
@@ -237,15 +243,17 @@ class Augment:
                     if dataSanity =='y':
                         img = self.drawBox(rot_img, sizeHW, classes, 
                                            rot_coord, window = False)
-                        # BUG: SOME PIXEL VALUES GET SAVED AS 255
+                        # OPEN CV BUG: BOX AND FONT COLOR VALUES ARE 255
                         img[img>1] = 1
-                        io.imsave((self.dirDict['sanityCheck'] / (filename+'.jpg'))
+                        io.imsave((self.dirDict['sanityCheck'] / (filename+'_san.jpg'))
                                   .as_posix(), img[...,::-1], quality=100)
                         
     def moveFiles(self, oldPath, newPath):
         copy_tree(self.dirDict[oldPath].as_posix(), 
                   self.dirDict[newPath].as_posix())
-        shutil.rmtree(self.dirDict[oldPath].as_posix())
+        delDir = input('Augmented images copied into data folder, delete augImages path? (Y/N): ').lower()
+        if delDir == 'y':
+            shutil.rmtree(self.dirDict[oldPath].as_posix())
         
     def makeTrainFile(self, path):
         dataTrainList = open((self.rootPath / 'dataset014_train.txt').as_posix(),'w')
@@ -255,6 +263,7 @@ class Augment:
             if i[-3::] != 'txt':
                 dataTrainList.write(oldString+i+'\n')
         dataTrainList.close()
+        print('Created training list for {} files'.format(len(files)))
                         
 def main():
     augment = Augment()
@@ -274,7 +283,7 @@ def main():
             augment.checkData(path='data')
             
         if choice == '2':
-            augment.rotateAugment(path = 'data')
+            augment.rotateAugment(path='data')
 
         if choice == '3':
             if augment.dirDict['augImages'].is_dir():
@@ -283,10 +292,10 @@ def main():
                 print('\nNo Aug. Images Folder Found!\n')
         
         if choice == '4':
-            augment.moveFiles(oldPath = 'augImages', newPath = 'data')
+            augment.moveFiles(oldPath='augImages', newPath='data')
         
         if choice == '5':
-            augment.makeTrainFile(path = 'data')
+            augment.makeTrainFile(path='data')
             
         if choice == '6':
             print("And a hell of a day it's been...")
